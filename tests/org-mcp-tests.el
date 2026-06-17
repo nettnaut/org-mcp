@@ -1,0 +1,43 @@
+;;; org-mcp-tests.el --- ert tests for org-mcp.el -*- lexical-binding: t; -*-
+
+;; Run inside the live Emacs (org-roam already loaded), e.g.:
+;;   emacsclient -e '(progn (load-file "~/code/org-mcp/org-mcp.el")
+;;                          (load-file "~/code/org-mcp/tests/org-mcp-tests.el")
+;;                          (ert-run-tests-batch "org-mcp"))'
+;;
+;; These focus on the confinement gate and the dispatch error contract — the
+;; parts that must never regress for safety. Tool round-trips (create -> search
+;; -> backlink) are exercised live against the real KB via tests/smoke.sh.
+
+(require 'ert)
+(require 'org-mcp)
+
+(ert-deftest org-mcp-confine-accepts-inside-root ()
+  (let ((f (expand-file-name "inbox.org" org-directory)))
+    (should (org-mcp--confine f))))
+
+(ert-deftest org-mcp-confine-rejects-traversal ()
+  (should-error
+   (org-mcp--confine (expand-file-name "../../etc/passwd" org-roam-directory))))
+
+(ert-deftest org-mcp-confine-rejects-absolute-outside ()
+  (should-error (org-mcp--confine "/etc/passwd")))
+
+(ert-deftest org-mcp-confine-write-rejects-non-org ()
+  (should-error
+   (org-mcp--confine-write (expand-file-name "notes.txt" org-directory))))
+
+(ert-deftest org-mcp-dispatch-unknown-tool-returns-error-json ()
+  (let ((out (json-parse-string (org-mcp-dispatch "bogus" "{}")
+                                :object-type 'alist)))
+    (should (alist-get 'error out))))
+
+(ert-deftest org-mcp-dispatch-search-returns-json-array ()
+  ;; Empty query matches everything; result must be valid JSON (a vector).
+  (let ((out (json-parse-string
+              (org-mcp-dispatch "org_search" "{\"query\":\"\",\"max_results\":1}")
+              :array-type 'list)))
+    (should (listp out))))
+
+(provide 'org-mcp-tests)
+;;; org-mcp-tests.el ends here
