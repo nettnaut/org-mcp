@@ -32,6 +32,38 @@
                                 :object-type 'alist)))
     (should (alist-get 'error out))))
 
+(ert-deftest org-mcp-edit-node-body-requires-content ()
+  ;; Content is validated before the id lookup, so this needs no real node.
+  (let ((out (json-parse-string
+              (org-mcp-dispatch "org_edit_node_body" "{\"id\":\"x\"}")
+              :object-type 'alist)))
+    (should (alist-get 'error out))))
+
+(ert-deftest org-mcp-edit-node-body-rejects-bad-operation ()
+  ;; Operation is validated before the id lookup, so a dummy id is fine.
+  (let ((out (json-parse-string
+              (org-mcp-dispatch
+               "org_edit_node_body"
+               "{\"id\":\"x\",\"content\":\"hi\",\"operation\":\"frobnicate\"}")
+              :object-type 'alist)))
+    (should (string-match-p "operation" (alist-get 'error out)))))
+
+(ert-deftest org-mcp-edit-node-body-rejects-whitespace-content ()
+  ;; Whitespace-only content must not pass the guard and silently empty a body.
+  (let ((out (json-parse-string
+              (org-mcp-dispatch "org_edit_node_body"
+                                "{\"id\":\"x\",\"content\":\"   \\n\\n\"}")
+              :object-type 'alist)))
+    (should (string-match-p "content" (alist-get 'error out)))))
+
+(ert-deftest org-mcp-edit-node-body-rejects-heading-content ()
+  ;; Content that would parse as a heading must be refused, not silently inserted.
+  (let ((out (json-parse-string
+              (org-mcp-dispatch "org_edit_node_body"
+                                "{\"id\":\"x\",\"content\":\"note\\n* sneaky\"}")
+              :object-type 'alist)))
+    (should (string-match-p "heading" (alist-get 'error out)))))
+
 (ert-deftest org-mcp-dispatch-search-returns-json-array ()
   ;; Empty query matches everything; result must be valid JSON (a vector).
   (let ((out (json-parse-string

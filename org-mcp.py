@@ -237,6 +237,18 @@ TOOLS = [
                     "`deadline` (org date string), or `refile` to a target file.",
      "inputSchema": _obj({"id": _STR, "state": _STR, "schedule": _STR,
                           "deadline": _STR, "refile": _STR}, ["id"])},
+    {"name": "org_edit_node_body",
+     "description": "Append to (or replace) the BODY text of an existing heading, "
+                    "located by org id. `operation` is 'append' (default — add after "
+                    "any existing body, before child headings) or 'replace' (overwrite "
+                    "the body, keeping the heading, planning lines and property drawer). "
+                    "`content` may be multi-line org markup, but a line starting with "
+                    "'*' is rejected (this edits body text, not outline structure). "
+                    "Use this to enrich a task with notes/context; use org_update_todo "
+                    "for state/schedule/deadline.",
+     "inputSchema": _obj({"id": _STR, "content": _STR,
+                          "operation": {**_STR, "default": "append"}},
+                         ["id", "content"])},
     {"name": "org_ensure_todo_ids",
      "description": "Backfill org IDs onto tasks. Ensures every TODO-state heading "
                     "(any keyword) in `files` — default the user's `org-agenda-files` "

@@ -16,7 +16,7 @@ org-roam IDs/backlinks, autosync) rather than a reimplementation.
 See `DESIGN.md` for the full design + decision log and `PLAN.md` for the build
 sequence.
 
-## Tools (11)
+## Tools (12)
 
 | Tool | What it does |
 |------|--------------|
@@ -30,6 +30,7 @@ sequence.
 | `org_agenda` | run a **custom agenda command** by key (`g`, `j`, `R`, …) |
 | `org_capture_todo` | create a TODO (returns its id) |
 | `org_update_todo` | change state / schedule / deadline / refile a TODO by id |
+| `org_edit_node_body` | append to (or replace) the **body text** of a heading by id; for notes/context (heading + meta-data untouched) |
 | `org_ensure_todo_ids` | backfill `:ID:`s onto TODO headings (default `org-agenda-files`) so the by-id tools work; `dry_run` to just count |
 
 ## Usage

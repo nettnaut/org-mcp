@@ -351,6 +351,51 @@ deterministically."
           (cons "deadline" (or deadline :false))
           (cons "updated" t))))
 
+(defun org-mcp--edit-node-body (id content operation)
+  "Append CONTENT to, or replace, the body of the heading identified by ID.
+OPERATION is \"append\" (default) — add CONTENT after any existing body,
+before child headings — or \"replace\", which overwrites the body while
+keeping the heading, planning lines and property drawer intact.  CONTENT may
+span multiple lines, but a line that would parse as a heading (starts with
+`*') is refused — this edits body text, not outline structure.  The heading
+and its meta-data (planning, property/logbook drawers, clocks) are never
+touched; for state/schedule/deadline use `org-mcp--update-todo'."
+  (unless (and content (not (string-empty-p (string-trim content))))
+    (error "content required"))
+  (when (string-match-p "^\\*+ " content)
+    (error "content would create a heading (line starts with `*'); \
+this tool edits body text only"))
+  (let ((op (or operation "append")))
+    (unless (member op '("append" "replace"))
+      (error "operation must be \"append\" or \"replace\": %s" op))
+    (let ((m (org-id-find id t)))
+      (unless m (error "id not found: %s" id))
+      (org-with-point-at m
+        (org-mcp--confine-write (buffer-file-name))
+        (org-back-to-heading t)
+        ;; End of this entry's own content = the next heading (a child or the
+        ;; following sibling), computed from the heading so we never absorb it.
+        (let ((end (save-excursion (outline-next-heading) (point))))
+          ;; FULL=t so we skip planning, the property drawer, AND logbook/clock
+          ;; lines — otherwise a `replace' would delete clock history / state log.
+          (org-end-of-meta-data t)
+          (let* ((start (min (point) end))
+                 (old (string-trim (buffer-substring-no-properties start end)))
+                 (add (string-trim content))
+                 (body (if (and (equal op "append") (> (length old) 0))
+                           (concat old "\n\n" add)
+                         add)))
+            (delete-region start end)
+            (goto-char start)
+            ;; Blank line after the meta-data, the body, then a blank line
+            ;; before whatever follows (the next heading or end of file).
+            (insert "\n" body "\n\n")))
+        (save-buffer))
+      (org-roam-db-sync)
+      (list (cons "id" id)
+            (cons "operation" op)
+            (cons "updated" t)))))
+
 (defun org-mcp--ensure-todo-ids (files dry-run)
   "Ensure every TODO-state heading in FILES has an :ID:.
 
@@ -456,6 +501,10 @@ returned as {\"error\": ...} so emacsclient never blocks or leaks a trace."
                                        (funcall a "schedule")
                                        (funcall a "deadline")
                                        (funcall a "refile")))
+                ("org_edit_node_body"
+                 (org-mcp--edit-node-body (funcall a "id")
+                                          (funcall a "content")
+                                          (funcall a "operation" "append")))
                 ("org_ensure_todo_ids"
                  (org-mcp--ensure-todo-ids (funcall a "files")
                                            (eq (funcall a "dry_run") t)))
