@@ -356,9 +356,15 @@ deterministically."
 OPERATION is \"append\" (default) — add CONTENT after any existing body,
 before child headings — or \"replace\", which overwrites the body while
 keeping the heading, planning lines and property drawer intact.  CONTENT may
-span multiple lines.  The heading and its meta-data are never touched; for
-state/schedule/deadline use `org-mcp--update-todo'."
-  (unless (and content (> (length content) 0)) (error "content required"))
+span multiple lines, but a line that would parse as a heading (starts with
+`*') is refused — this edits body text, not outline structure.  The heading
+and its meta-data (planning, property/logbook drawers, clocks) are never
+touched; for state/schedule/deadline use `org-mcp--update-todo'."
+  (unless (and content (not (string-empty-p (string-trim content))))
+    (error "content required"))
+  (when (string-match-p "^\\*+ " content)
+    (error "content would create a heading (line starts with `*'); \
+this tool edits body text only"))
   (let ((op (or operation "append")))
     (unless (member op '("append" "replace"))
       (error "operation must be \"append\" or \"replace\": %s" op))
@@ -370,7 +376,9 @@ state/schedule/deadline use `org-mcp--update-todo'."
         ;; End of this entry's own content = the next heading (a child or the
         ;; following sibling), computed from the heading so we never absorb it.
         (let ((end (save-excursion (outline-next-heading) (point))))
-          (org-end-of-meta-data)        ; past planning line + property drawer
+          ;; FULL=t so we skip planning, the property drawer, AND logbook/clock
+          ;; lines — otherwise a `replace' would delete clock history / state log.
+          (org-end-of-meta-data t)
           (let* ((start (min (point) end))
                  (old (string-trim (buffer-substring-no-properties start end)))
                  (add (string-trim content))
@@ -379,8 +387,8 @@ state/schedule/deadline use `org-mcp--update-todo'."
                          add)))
             (delete-region start end)
             (goto-char start)
-            ;; Blank line after the drawer, the body, then a blank line before
-            ;; whatever follows (the next heading or end of file).
+            ;; Blank line after the meta-data, the body, then a blank line
+            ;; before whatever follows (the next heading or end of file).
             (insert "\n" body "\n\n")))
         (save-buffer))
       (org-roam-db-sync)

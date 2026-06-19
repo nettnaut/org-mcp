@@ -242,8 +242,10 @@ TOOLS = [
                     "located by org id. `operation` is 'append' (default — add after "
                     "any existing body, before child headings) or 'replace' (overwrite "
                     "the body, keeping the heading, planning lines and property drawer). "
-                    "`content` may be multi-line org markup. Use this to enrich a task "
-                    "with notes/context; use org_update_todo for state/schedule/deadline.",
+                    "`content` may be multi-line org markup, but a line starting with "
+                    "'*' is rejected (this edits body text, not outline structure). "
+                    "Use this to enrich a task with notes/context; use org_update_todo "
+                    "for state/schedule/deadline.",
      "inputSchema": _obj({"id": _STR, "content": _STR,
                           "operation": {**_STR, "default": "append"}},
                          ["id", "content"])},
