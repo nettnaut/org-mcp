@@ -80,6 +80,20 @@ symlink pointing outside the roots can escape."
         ((listp v) v)
         (t (list v))))
 
+(defun org-mcp--clean-tags (v)
+  "Coerce V to a list of *legal* org tags.
+Org only recognises [[:alnum:]_@#%] in tags, so any other character (a
+hyphen, space, dot, …) silently turns the whole `:a:b:' run into plain
+heading text that no agenda tag search can match.  Each tag is mapped to
+that legal set (illegal chars -> `_'); empties are dropped.  Apply this
+to every caller-supplied tag list *before* writing it to a file."
+  (delq nil
+        (mapcar (lambda (tag)
+                  (let ((clean (replace-regexp-in-string
+                                "[^[:alnum:]_@#%]" "_" (format "%s" tag))))
+                    (and (> (length clean) 0) clean)))
+                (org-mcp--str-list v))))
+
 (defun org-mcp--node-link (node)
   (format "[[id:%s][%s]]" (org-roam-node-id node) (org-roam-node-title node)))
 
@@ -198,7 +212,7 @@ deterministically."
   (unless (and title (stringp title) (> (length title) 0))
     (error "title required"))
   (let* ((id (org-id-new))
-         (tags (org-mcp--str-list tags))
+         (tags (org-mcp--clean-tags tags))
          (node (org-roam-node-create :id id :title title))
          (filetags (if tags
                        (format "#+filetags: :%s:\n" (string-join tags ":"))
@@ -314,20 +328,48 @@ deterministically."
                            (concat other ".org"))))))
     (org-mcp--confine-write (expand-file-name fname org-directory))))
 
-(defun org-mcp--capture-todo (text target tags)
-  "Append a new TODO to TARGET (default inbox.org)."
+(defun org-mcp--find-tasks-heading ()
+  "Return (POS LEVEL) of the first \"Tasks\" heading in the current buffer.
+POS is the start of the heading line and LEVEL its outline depth (number
+of leading stars).  Matches a heading whose title is exactly \"Tasks\"
+(trailing tags allowed).  Returns nil when no such heading exists."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward
+           "^\\(\\*+\\)[ \t]+Tasks[ \t]*\\(?::[[:alnum:]_@#%:]+:\\)?[ \t]*$"
+           nil t)
+      (list (match-beginning 0) (length (match-string 1))))))
+
+(defun org-mcp--capture-todo (text target tags body)
+  "Create a new TODO in TARGET (default inbox.org).
+TEXT is a short, succinct action used verbatim as the heading — keep it to
+one line.  Optional BODY holds any longer details/context and is placed in
+the entry body (after the property drawer), so headings stay readable in
+agenda and project views.  In a file that has a \"Tasks\" heading the TODO
+is inserted as its last child; otherwise it is appended at end of file."
   (unless (and text (> (length text) 0)) (error "text required"))
   (let ((file (org-mcp--target-file target))
-        (tags (org-mcp--str-list tags))
+        (tags (org-mcp--clean-tags tags))
         (id nil))
     (with-current-buffer (find-file-noselect file)
-      (goto-char (point-max))
-      (unless (bolp) (insert "\n"))
-      (insert (format "* TODO %s%s\n" text
-                      (if tags (format "  :%s:" (string-join tags ":")) "")))
-      (forward-line -1)
-      (setq id (org-id-get-create))   ; stable handle for org_update_todo
-      (save-buffer))
+      (let* ((tasks (org-mcp--find-tasks-heading))
+             (level (if tasks (1+ (nth 1 tasks)) 1)))
+        (if tasks
+            ;; Land at the end of the Tasks subtree so the new entry becomes
+            ;; its last child rather than a sibling further down the file.
+            (progn (goto-char (nth 0 tasks))
+                   (org-end-of-subtree t t))
+          (goto-char (point-max)))
+        (unless (bolp) (insert "\n"))
+        (insert (format "%s TODO %s%s\n"
+                        (make-string level ?*) text
+                        (if tags (format "  :%s:" (string-join tags ":")) "")))
+        (forward-line -1)
+        (setq id (org-id-get-create))   ; stable handle for org_update_todo
+        (when (and body (> (length (string-trim body)) 0))
+          (org-end-of-meta-data t)      ; skip planning + property drawer
+          (insert (string-trim-right body) "\n"))
+        (save-buffer)))
     (org-roam-db-sync)
     (list (cons "file" file) (cons "id" id)
           (cons "text" text) (cons "state" "TODO"))))
@@ -350,6 +392,27 @@ deterministically."
           (cons "scheduled" (or schedule :false))
           (cons "deadline" (or deadline :false))
           (cons "updated" t))))
+
+(defun org-mcp--rename-heading (id title)
+  "Set the headline TEXT of the entry identified by ID to TITLE.
+Only the title is replaced; the outline level, TODO keyword, priority,
+tags, planning lines, property drawer and body are all preserved.  TITLE
+must be a single, non-empty line — use this to shorten a bloated heading
+after moving its detail into the body with `org-mcp--edit-node-body'."
+  (unless (and title (> (length (string-trim title)) 0))
+    (error "title required"))
+  (when (string-match-p "[\n\r]" title)
+    (error "title must be a single line"))
+  (let ((title (string-trim title))
+        (m (org-id-find id t)))
+    (unless m (error "id not found: %s" id))
+    (org-with-point-at m
+      (org-mcp--confine-write (buffer-file-name))
+      (org-back-to-heading t)
+      (org-edit-headline title)
+      (save-buffer))
+    (org-roam-db-sync)
+    (list (cons "id" id) (cons "title" title) (cons "renamed" t))))
 
 (defun org-mcp--edit-node-body (id content operation)
   "Append CONTENT to, or replace, the body of the heading identified by ID.
@@ -494,13 +557,17 @@ returned as {\"error\": ...} so emacsclient never blocks or leaks a trace."
                 ("org_capture_todo"
                  (org-mcp--capture-todo (funcall a "text")
                                         (funcall a "target" "inbox")
-                                        (funcall a "tags")))
+                                        (funcall a "tags")
+                                        (funcall a "body")))
                 ("org_update_todo"
                  (org-mcp--update-todo (funcall a "id")
                                        (funcall a "state")
                                        (funcall a "schedule")
                                        (funcall a "deadline")
                                        (funcall a "refile")))
+                ("org_rename_heading"
+                 (org-mcp--rename-heading (funcall a "id")
+                                          (funcall a "title")))
                 ("org_edit_node_body"
                  (org-mcp--edit-node-body (funcall a "id")
                                           (funcall a "content")
