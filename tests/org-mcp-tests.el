@@ -64,6 +64,48 @@
               :object-type 'alist)))
     (should (string-match-p "heading" (alist-get 'error out)))))
 
+(ert-deftest org-mcp-find-tasks-heading-locates-exact-title ()
+  ;; Drives child-placement in org_capture_todo: a new TODO is filed under the
+  ;; "Tasks" heading only when this finds it, with the right outline level.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Tasks\n** TODO existing\n* Archive  :ARCHIVE:\n")
+    (let ((hit (org-mcp--find-tasks-heading)))
+      (should hit)
+      (should (= 1 (nth 1 hit)))             ; level of "* Tasks"
+      (should (= (point-min) (nth 0 hit))))))
+
+(ert-deftest org-mcp-find-tasks-heading-nil-without-tasks ()
+  ;; No "Tasks" heading -> capture falls back to appending at end of file.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Project\n** TODO existing\n* Tasks for later\n")  ; substring, not exact
+    (should-not (org-mcp--find-tasks-heading))))
+
+(ert-deftest org-mcp-clean-tags-sanitizes-illegal-chars ()
+  ;; Hyphens/spaces/dots in a tag silently break org tag parsing, so the
+  ;; server must map them to the legal set before writing them to a file.
+  (should (equal '("levive" "rag" "d_008" "D_008")
+                 (org-mcp--clean-tags '("levive" "rag" "d-008" "D-008"))))
+  (should (equal '("a_b" "c_d") (org-mcp--clean-tags '("a b" "c.d"))))
+  ;; Empties (incl. an all-illegal tag collapsing to "") are dropped.
+  (should (equal '("ok") (org-mcp--clean-tags '("ok" "")))))
+
+(ert-deftest org-mcp-rename-heading-requires-title ()
+  ;; Title is validated before the id lookup, so this needs no real node.
+  (let ((out (json-parse-string
+              (org-mcp-dispatch "org_rename_heading" "{\"id\":\"x\",\"title\":\"   \"}")
+              :object-type 'alist)))
+    (should (string-match-p "title" (alist-get 'error out)))))
+
+(ert-deftest org-mcp-rename-heading-rejects-multiline ()
+  ;; A heading is one line; a newline in the title must be refused, not written.
+  (let ((out (json-parse-string
+              (org-mcp-dispatch "org_rename_heading"
+                                "{\"id\":\"x\",\"title\":\"two\\nlines\"}")
+              :object-type 'alist)))
+    (should (string-match-p "single line" (alist-get 'error out)))))
+
 (ert-deftest org-mcp-dispatch-search-returns-json-array ()
   ;; Empty query matches everything; result must be valid JSON (a vector).
   (let ((out (json-parse-string

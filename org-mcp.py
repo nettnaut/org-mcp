@@ -226,10 +226,16 @@ TOOLS = [
                     "(text, todo state, id, file) plus the rendered agenda text.",
      "inputSchema": _obj({"key": {**_STR, "default": "g"}}, [])},
     {"name": "org_capture_todo",
-     "description": "Create a new TODO. `target` is a friendly name (inbox/agenda/notes/"
-                    "someday) or a filename, default 'inbox'. Returns the new TODO's id "
-                    "(usable with org_update_todo).",
-     "inputSchema": _obj({"text": _STR, "target": {**_STR, "default": "inbox"},
+     "description": "Create a new TODO. `text` is the heading and MUST be a short, "
+                    "succinct action (one line) — keep agenda/project views readable; "
+                    "put any longer details, context, or links in `body` (multi-line "
+                    "org markup placed in the entry body, after the property drawer), "
+                    "NOT in `text`. `target` is a friendly name (inbox/agenda/notes/"
+                    "someday) or a filename, default 'inbox'. In a file with a 'Tasks' "
+                    "heading the TODO is filed as its child. Returns the new TODO's id "
+                    "(usable with org_update_todo / org_edit_node_body).",
+     "inputSchema": _obj({"text": _STR, "body": _STR,
+                          "target": {**_STR, "default": "inbox"},
                           "tags": _STRS}, ["text"])},
     {"name": "org_update_todo",
      "description": "Modify an existing TODO heading (located by org id). Any of: change "
@@ -237,6 +243,13 @@ TOOLS = [
                     "`deadline` (org date string), or `refile` to a target file.",
      "inputSchema": _obj({"id": _STR, "state": _STR, "schedule": _STR,
                           "deadline": _STR, "refile": _STR}, ["id"])},
+    {"name": "org_rename_heading",
+     "description": "Rename an existing heading (located by org id): replace only its "
+                    "`title` text, keeping the TODO keyword, tags, planning lines, "
+                    "property drawer and body intact. `title` must be a single line — "
+                    "keep it a short, succinct action and move any detail into the body "
+                    "with org_edit_node_body. Use this to shorten a bloated heading.",
+     "inputSchema": _obj({"id": _STR, "title": _STR}, ["id", "title"])},
     {"name": "org_edit_node_body",
      "description": "Append to (or replace) the BODY text of an existing heading, "
                     "located by org id. `operation` is 'append' (default — add after "
