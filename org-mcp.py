@@ -21,17 +21,46 @@ Two boundary gotchas handled here:
 Content search (org_search_content) runs ripgrep directly in Python for speed,
 pinned to the org-roam root, and only calls Emacs for tag->file and line->node
 resolution. See DESIGN.md.
+
+Transports: stdio (default) or Streamable HTTP (`--http HOST:PORT`), both
+served by the same `handle`. `ORG_MCP_PROFILE=remote` narrows the tool surface
+to read tools + inbox capture for exposure beyond the local machine.
 """
 
+import argparse
+import copy
+import hmac
+import ipaddress
 import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ORG_MCP_EL = os.path.join(HERE, "org-mcp.el")
 EMACS_TIMEOUT = 10
 TRANSCRIPTS_GLOB = "!agent-shell-transcripts/**"  # mirrors org-roam-file-exclude-regexp
+
+# Newest first; `initialize` echoes the client's version when it is listed here.
+PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+
+# Tool profiles. "remote" is for any transport reachable from outside this
+# machine: read tools plus capture-to-inbox, nothing that edits existing notes.
+REMOTE_TOOLS = frozenset({"org_search", "org_search_content", "org_get_node",
+                          "org_agenda", "org_backlinks", "org_capture_todo"})
+PROFILES = {"full": None, "remote": REMOTE_TOOLS}
+PROFILE = os.environ.get("ORG_MCP_PROFILE", "full")
+
+# HTTP mode. Meant to sit behind an authenticating proxy on loopback; the
+# optional static bearer token is a second lock, not the primary auth.
+HTTP_PATH = "/mcp"
+HTTP_TOKEN = os.environ.get("ORG_MCP_HTTP_TOKEN") or None
+ALLOWED_ORIGINS = {o.strip() for o in os.environ.get("ORG_MCP_ALLOWED_ORIGINS", "").split(",")
+                   if o.strip()}
+MAX_BODY = 1 << 20
+AUDIT = False  # log every tools/call to stderr; on in HTTP mode
 
 
 # --------------------------------------------------------------------------- #
@@ -278,7 +307,43 @@ TOOLS = [
 _LOCAL = {"org_search_content"}
 
 
+class ToolNotAvailable(Exception):
+    """Tool unknown in the active profile -> JSON-RPC -32602, never reaches Emacs."""
+
+
+def check_profile(name):
+    if name not in PROFILES:
+        sys.exit(f"org-mcp: unknown ORG_MCP_PROFILE {name!r} (use: {', '.join(PROFILES)})")
+
+
+def _inbox_only(tool):
+    t = copy.deepcopy(tool)
+    t["inputSchema"]["properties"].pop("target", None)
+    t["description"] = (
+        "Capture a new TODO into the user's inbox (inbox.org) for later review. "
+        "`text` is the heading and MUST be a short, succinct action (one line); put "
+        "any longer details, context, or links in `body` (multi-line org markup "
+        "placed in the entry body). Returns the new TODO's id.")
+    return t
+
+
+def visible_tools():
+    allowed = PROFILES[PROFILE]
+    if allowed is None:
+        return TOOLS
+    return [_inbox_only(t) if t["name"] == "org_capture_todo" else t
+            for t in TOOLS if t["name"] in allowed]
+
+
 def call_tool(name, args):
+    allowed = PROFILES[PROFILE]
+    if allowed is not None:
+        if name not in allowed:
+            raise ToolNotAvailable(f"Unknown tool: {name}")
+        if name == "org_capture_todo":
+            if args.get("target", "inbox") != "inbox":
+                raise ValueError("this server only captures to the inbox")
+            args = {**args, "target": "inbox"}
     if name == "org_search_content":
         return search_content(
             args["query"], args.get("tags"),
@@ -289,43 +354,163 @@ def call_tool(name, args):
 # --------------------------------------------------------------------------- #
 # JSON-RPC handling
 # --------------------------------------------------------------------------- #
+def _audit(name, args, ok, size):
+    if AUDIT:
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        sys.stderr.write(f"org-mcp audit: {ts} tool={name} args={sorted(args)} "
+                         f"ok={ok} bytes={size}\n")
+
+
 def handle(request):
+    """Answer one JSON-RPC message: the response dict, or None for a notification."""
     method = request.get("method")
     rid = request.get("id")
 
+    def result(r):
+        return {"jsonrpc": "2.0", "id": rid, "result": r}
+
+    def error(code, message):
+        return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
+
     if method == "initialize":
-        send({"jsonrpc": "2.0", "id": rid, "result": {
-            "protocolVersion": "2024-11-05",
+        asked = (request.get("params") or {}).get("protocolVersion")
+        return result({
+            "protocolVersion": asked if asked in PROTOCOL_VERSIONS else "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "org-mcp", "version": "1.0.0"},
-        }})
-    elif method == "notifications/initialized":
-        pass
-    elif method == "tools/list":
-        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}})
-    elif method == "tools/call":
-        name = request["params"]["name"]
-        args = request["params"].get("arguments", {})
+            "serverInfo": {"name": "org-mcp", "version": "1.1.0"},
+        })
+    if method == "notifications/initialized":
+        return None
+    if method == "ping":
+        return result({})
+    if method == "tools/list":
+        return result({"tools": visible_tools()})
+    if method == "tools/call":
+        params = request.get("params") or {}
+        name = params.get("name")
+        args = params.get("arguments") or {}
         try:
-            result = call_tool(name, args)
-            is_error = isinstance(result, dict) and "error" in result
-            send({"jsonrpc": "2.0", "id": rid, "result": {
-                "content": [{"type": "text",
-                             "text": json.dumps(result, indent=2, ensure_ascii=False)}],
-                "isError": is_error,
-            }})
+            out = call_tool(name, args)
+        except ToolNotAvailable as e:
+            _audit(name, args, False, 0)
+            return error(-32602, str(e))
         except Exception as e:
-            send({"jsonrpc": "2.0", "id": rid, "result": {
-                "content": [{"type": "text", "text": f"Error: {e}"}],
-                "isError": True,
-            }})
-    else:
-        if rid is not None:
-            send({"jsonrpc": "2.0", "id": rid,
-                  "error": {"code": -32601, "message": f"Method not found: {method}"}})
+            _audit(name, args, False, 0)
+            return result({"content": [{"type": "text", "text": f"Error: {e}"}],
+                           "isError": True})
+        text = json.dumps(out, indent=2, ensure_ascii=False)
+        is_error = isinstance(out, dict) and "error" in out
+        _audit(name, args, not is_error, len(text))
+        return result({"content": [{"type": "text", "text": text}], "isError": is_error})
+    if rid is None:
+        return None
+    return error(-32601, f"Method not found: {method}")
 
 
-def main():
+# --------------------------------------------------------------------------- #
+# Streamable HTTP (stateless: POST in, JSON out; no server-initiated stream)
+# --------------------------------------------------------------------------- #
+class _MCPHandler(BaseHTTPRequestHandler):
+    server_version = "org-mcp"
+    timeout = 30  # the server is single-threaded: don't let one slow client stall it
+
+    def log_message(self, fmt, *a):
+        sys.stderr.write("org-mcp http: " + fmt % a + "\n")
+
+    def _reply(self, code, body=None, headers=()):
+        data = json.dumps(body).encode() if body is not None else b""
+        self.send_response(code)
+        for k, v in headers:
+            self.send_header(k, v)
+        if body is not None:
+            self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _admit(self):
+        """Path, Origin and token checks shared by every method. False = replied."""
+        if self.path.split("?", 1)[0] != HTTP_PATH:
+            self._reply(404)
+            return False
+        origin = self.headers.get("Origin")
+        if origin and origin not in ALLOWED_ORIGINS:
+            self._reply(403)
+            return False
+        if HTTP_TOKEN:
+            got = self.headers.get("Authorization", "")
+            if not hmac.compare_digest(got.encode(), f"Bearer {HTTP_TOKEN}".encode()):
+                self._reply(401, headers=[("WWW-Authenticate", "Bearer")])
+                return False
+        return True
+
+    def do_GET(self):
+        if self._admit():
+            self._reply(405, headers=[("Allow", "POST")])
+
+    do_DELETE = do_GET
+
+    def do_POST(self):
+        if not self._admit():
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = -1
+        if length < 0 or length > MAX_BODY:
+            self.close_connection = True
+            self._reply(413)
+            return
+        try:
+            msg = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._reply(400, {"jsonrpc": "2.0", "id": None,
+                              "error": {"code": -32700, "message": "Parse error"}})
+            return
+        if isinstance(msg, list):  # 2025-03-26 batches
+            out = [r for r in (handle(m) for m in msg if isinstance(m, dict)) if r]
+        elif isinstance(msg, dict):
+            out = handle(msg)
+        else:
+            out = {"jsonrpc": "2.0", "id": None,
+                   "error": {"code": -32600, "message": "Invalid Request"}}
+        if out:
+            self._reply(200, out)
+        else:
+            self._reply(202)
+
+
+def make_http_server(host, port):
+    # Single-threaded on purpose: requests are serialised, like Emacs itself.
+    return HTTPServer((host, port), _MCPHandler)
+
+
+def serve_http(addr):
+    global AUDIT
+    host, _, port = addr.rpartition(":")
+    host = host.strip("[]") or "127.0.0.1"
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if not loopback:
+        sys.stderr.write(f"org-mcp: WARNING binding {host} (not loopback) — put an "
+                         "authenticating proxy in front and use ORG_MCP_PROFILE=remote\n")
+    AUDIT = True
+    httpd = make_http_server(host, int(port))
+    sys.stderr.write(f"org-mcp: profile={PROFILE} listening on http://{addr}{HTTP_PATH}\n")
+    httpd.serve_forever()
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="MCP server for org-mode + org-roam")
+    ap.add_argument("--http", metavar="HOST:PORT",
+                    help="serve Streamable HTTP at HOST:PORT/mcp instead of stdio")
+    opts = ap.parse_args(argv)
+    check_profile(PROFILE)
+    if opts.http:
+        serve_http(opts.http)
+        return
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -334,7 +519,9 @@ def main():
             request = json.loads(line)
         except json.JSONDecodeError:
             continue
-        handle(request)
+        response = handle(request)
+        if response is not None:
+            send(response)
 
 
 if __name__ == "__main__":

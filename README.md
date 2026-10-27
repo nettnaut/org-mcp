@@ -8,15 +8,15 @@ talking to a **live Emacs** over `emacsclient`, so everything runs through your
 real org config (custom agenda commands, TODO keywords, capture templates,
 org-roam IDs/backlinks, autosync) rather than a reimplementation.
 
-- **`org-mcp.py`** — a zero-dependency, hand-rolled JSON-RPC **stdio** server
-  (same shape as the in-house `mu4e-mcp.py`). Pure MCP/JSON plumbing.
+- **`org-mcp.py`** — a zero-dependency, hand-rolled JSON-RPC server over
+  **stdio** (default) or **Streamable HTTP** (`--http`). Pure MCP/JSON plumbing.
 - **`org-mcp.el`** — the backend, loaded into your Emacs. All org logic lives
   here behind a single entry point, `org-mcp-dispatch`.
 
 See `DESIGN.md` for the full design + decision log and `PLAN.md` for the build
 sequence.
 
-## Tools (12)
+## Tools (13)
 
 | Tool | What it does |
 |------|--------------|
@@ -30,6 +30,7 @@ sequence.
 | `org_agenda` | run a **custom agenda command** by key (`g`, `j`, `R`, …) |
 | `org_capture_todo` | create a TODO (returns its id) |
 | `org_update_todo` | change state / schedule / deadline / refile a TODO by id |
+| `org_rename_heading` | rename a heading by id, keeping keyword, tags, planning and body |
 | `org_edit_node_body` | append to (or replace) the **body text** of a heading by id; for notes/context (heading + meta-data untouched) |
 | `org_ensure_todo_ids` | backfill `:ID:`s onto TODO headings (default `org-agenda-files`) so the by-id tools work; `dry_run` to just count |
 
@@ -103,10 +104,42 @@ side is stdlib-only — nothing to `pip install`.
 > run the `org_ensure_todo_ids` tool once (try `dry_run` first) to backfill the
 > `:ID:`s that `org_update_todo` / `org_get_node` rely on.
 
+## Remote access (HTTP mode)
+
+To reach your notes from a client that isn't on this machine — e.g. a claude.ai
+custom connector — run the server in HTTP mode behind an authenticating proxy:
+
+```sh
+ORG_MCP_PROFILE=remote python3 org-mcp.py --http 127.0.0.1:8765
+# MCP endpoint: http://127.0.0.1:8765/mcp
+```
+
+- **Transport:** stateless MCP *Streamable HTTP* — `POST /mcp` with a JSON-RPC
+  message (or batch), JSON response; notifications get `202`. No server-initiated
+  stream, so `GET` is `405`. Requests are handled one at a time.
+- **`ORG_MCP_PROFILE=remote`** limits the tools to `org_search`,
+  `org_search_content`, `org_get_node`, `org_agenda`, `org_backlinks` and
+  `org_capture_todo` — and capture always goes to the inbox (`target` is removed
+  from its schema; any other target is refused). Other tools are hidden from
+  `tools/list` *and* refused on `tools/call` (JSON-RPC `-32602`) before Emacs
+  is touched. Default profile (`full`) is unchanged.
+- **Bind to loopback** and put real authentication (e.g. an OAuth proxy) in
+  front. The server warns on a non-loopback bind.
+- **`ORG_MCP_HTTP_TOKEN`** — optional: require `Authorization: Bearer <token>`
+  on every request, as a second lock behind the proxy.
+- **`ORG_MCP_ALLOWED_ORIGINS`** — comma-separated; requests carrying any other
+  `Origin` header get `403` (DNS-rebinding guard). Requests without `Origin`
+  (server-to-server) are allowed.
+- **Dedicated Emacs:** `emacsclient` honours `EMACS_SOCKET_NAME`, so e.g.
+  `EMACS_SOCKET_NAME=org-mcp` points the server at an `emacs --daemon=org-mcp`.
+- In HTTP mode every `tools/call` is logged to stderr (tool, argument *names*,
+  ok, result size — never argument values or results).
+
 ## Tests
 
 ```sh
 python3 tests/test_boundary.py     # pure-Python: prin1 unwrap, escaping, Emacs-down
+python3 tests/test_transport.py    # pure-Python: JSON-RPC, remote profile, HTTP mode
 bash    tests/smoke.sh             # end-to-end against the live Emacs
 emacsclient -e '(progn (load-file "~/code/org-mcp/org-mcp.el") \
   (load-file "~/code/org-mcp/tests/org-mcp-tests.el") \

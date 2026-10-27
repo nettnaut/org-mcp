@@ -23,3 +23,5 @@ jobs:
         run: python -m py_compile org-mcp.py
       - name: Run pure-Python boundary tests
         run: python tests/test_boundary.py
+      - name: Run pure-Python transport tests (JSON-RPC, remote profile, HTTP)
+        run: python tests/test_transport.py
