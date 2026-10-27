@@ -82,6 +82,55 @@
     (insert "* Project\n** TODO existing\n* Tasks for later\n")  ; substring, not exact
     (should-not (org-mcp--find-tasks-heading))))
 
+(ert-deftest org-mcp-find-tasks-heading-allows-statistics-cookie ()
+  ;; "* Tasks [0/7]  :project:" is how org renders a Tasks heading with a
+  ;; progress cookie; it must still be the capture target (it used to fall
+  ;; through to end-of-file, filing the TODO after an :ARCHIVE: tree).
+  (dolist (heading '("* Tasks [0/7]                    :project:"
+                     "* Tasks [42%]"
+                     "* Tasks [/]  :project:"
+                     "** Tasks [3/3]"))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Overview\n" heading "\n** TODO existing\n* Archive  :ARCHIVE:\n")
+      (let ((hit (org-mcp--find-tasks-heading)))
+        (should hit)
+        (should (= (if (string-prefix-p "** " heading) 2 1) (nth 1 hit)))
+        (should (string-prefix-p heading
+                                 (buffer-substring (nth 0 hit) (line-end-position 2))))))))
+
+(ert-deftest org-mcp-find-tasks-heading-rejects-cookie-lookalikes ()
+  ;; Only a statistics cookie may follow "Tasks" — not other words or brackets.
+  (dolist (heading '("* Tasks for later [0/2]" "* Tasks [later]" "* Tasks[0/7]"))
+    (with-temp-buffer
+      (org-mode)
+      (insert heading "\n")
+      (should-not (org-mcp--find-tasks-heading)))))
+
+(ert-deftest org-mcp-capture-todo-files-under-cookie-tasks-heading ()
+  ;; End to end in a temp file inside the roam root: the new TODO becomes the
+  ;; last child of "* Tasks [0/1]", not a top-level heading after * Archive.
+  ;; after-save-hook is cleared so the user's own save hooks (auto-commit,
+  ;; roam autosync, …) never fire on this throwaway file.
+  (let* ((after-save-hook nil)
+         (file (make-temp-file (expand-file-name "org-mcp-test-" org-directory) nil ".org"))
+         (rel (file-relative-name file org-directory)))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Tasks [0/1]  :project:\n** TODO existing\n* Archive  :ARCHIVE:\n"))
+          (org-mcp-dispatch "org_capture_todo"
+                            (json-encode `((text . "new one") (target . ,rel))))
+          (with-current-buffer (find-file-noselect file)
+            (revert-buffer t t t)
+            (goto-char (point-min))
+            (should (re-search-forward "^\\*\\* TODO new one" nil t))
+            (should (< (point) (save-excursion (goto-char (point-min))
+                                               (re-search-forward "^\\* Archive")
+                                               (point))))))
+      (let ((b (get-file-buffer file))) (when b (with-current-buffer b (set-buffer-modified-p nil)) (kill-buffer b)))
+      (delete-file file))))
+
 (ert-deftest org-mcp-clean-tags-sanitizes-illegal-chars ()
   ;; Hyphens/spaces/dots in a tag silently break org tag parsing, so the
   ;; server must map them to the legal set before writing them to a file.

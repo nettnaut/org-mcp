@@ -331,12 +331,15 @@ deterministically."
 (defun org-mcp--find-tasks-heading ()
   "Return (POS LEVEL) of the first \"Tasks\" heading in the current buffer.
 POS is the start of the heading line and LEVEL its outline depth (number
-of leading stars).  Matches a heading whose title is exactly \"Tasks\"
-(trailing tags allowed).  Returns nil when no such heading exists."
+of leading stars).  Matches a heading whose title is exactly \"Tasks\",
+optionally followed by a statistics cookie ([2/5], [40%], [/]) and/or
+trailing tags.  Returns nil when no such heading exists."
   (save-excursion
     (goto-char (point-min))
     (when (re-search-forward
-           "^\\(\\*+\\)[ \t]+Tasks[ \t]*\\(?::[[:alnum:]_@#%:]+:\\)?[ \t]*$"
+           (concat "^\\(\\*+\\)[ \t]+Tasks"
+                   "\\(?:[ \t]+\\[[0-9]*\\(?:/[0-9]*\\|%\\)\\]\\)?"   ; statistics cookie
+                   "[ \t]*\\(?::[[:alnum:]_@#%:]+:\\)?[ \t]*$")       ; tags
            nil t)
       (list (match-beginning 0) (length (match-string 1))))))
 
