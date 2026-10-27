@@ -57,6 +57,10 @@ PROFILE = os.environ.get("ORG_MCP_PROFILE", "full")
 # optional static bearer token is a second lock, not the primary auth.
 HTTP_PATH = "/mcp"
 HTTP_TOKEN = os.environ.get("ORG_MCP_HTTP_TOKEN") or None
+# Header that carries the token. Unset: "Authorization: Bearer <token>". Set
+# (e.g. X-Upstream-Key): the raw token in that header, for proxies that own
+# Authorization themselves (Pomerium in MCP mode).
+HTTP_TOKEN_HEADER = os.environ.get("ORG_MCP_HTTP_TOKEN_HEADER") or None
 ALLOWED_ORIGINS = {o.strip() for o in os.environ.get("ORG_MCP_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 MAX_BODY = 1 << 20
@@ -437,7 +441,13 @@ class _MCPHandler(BaseHTTPRequestHandler):
         if origin and origin not in ALLOWED_ORIGINS:
             self._reply(403)
             return False
-        if HTTP_TOKEN:
+        if HTTP_TOKEN and HTTP_TOKEN_HEADER:
+            # 403, not 401: a 401 makes an OAuth proxy start upstream OAuth.
+            got = self.headers.get(HTTP_TOKEN_HEADER, "")
+            if not hmac.compare_digest(got.encode(), HTTP_TOKEN.encode()):
+                self._reply(403)
+                return False
+        elif HTTP_TOKEN:
             got = self.headers.get("Authorization", "")
             if not hmac.compare_digest(got.encode(), f"Bearer {HTTP_TOKEN}".encode()):
                 self._reply(401, headers=[("WWW-Authenticate", "Bearer")])

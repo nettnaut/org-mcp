@@ -167,10 +167,12 @@ class HTTP(unittest.TestCase):
 
     def setUp(self):
         self._token = orgmcp.HTTP_TOKEN
+        self._token_header = orgmcp.HTTP_TOKEN_HEADER
         self._origins = orgmcp.ALLOWED_ORIGINS
 
     def tearDown(self):
         orgmcp.HTTP_TOKEN = self._token
+        orgmcp.HTTP_TOKEN_HEADER = self._token_header
         orgmcp.ALLOWED_ORIGINS = self._origins
 
     def request(self, method="POST", body=None, path="/mcp", headers=None, raw=None):
@@ -252,6 +254,24 @@ class HTTP(unittest.TestCase):
         self.assertEqual(resp.status, 401)
         resp, _ = self.request(body=rpc("tools/list"),
                                headers={"Authorization": "Bearer s3cret-test-token"})
+        self.assertEqual(resp.status, 200)
+
+    def test_token_in_custom_header(self):
+        orgmcp.HTTP_TOKEN = "s3cret-test-token"
+        orgmcp.HTTP_TOKEN_HEADER = "X-Upstream-Key"
+        resp, _ = self.request(body=rpc("tools/list"))
+        self.assertEqual(resp.status, 403)
+        self.assertIsNone(resp.getheader("WWW-Authenticate"))
+        resp, _ = self.request(body=rpc("tools/list"),
+                               headers={"X-Upstream-Key": "wrong"})
+        self.assertEqual(resp.status, 403)
+        # The Bearer form no longer counts; the proxy's own Authorization is ignored.
+        resp, _ = self.request(body=rpc("tools/list"),
+                               headers={"Authorization": "Bearer s3cret-test-token"})
+        self.assertEqual(resp.status, 403)
+        resp, _ = self.request(body=rpc("tools/list"),
+                               headers={"X-Upstream-Key": "s3cret-test-token",
+                                        "Authorization": "Bearer proxy-owned"})
         self.assertEqual(resp.status, 200)
 
     def test_remote_profile_enforced_over_http(self):
