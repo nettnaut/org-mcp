@@ -125,12 +125,12 @@ def _emacs_eval(form, timeout=EMACS_TIMEOUT):
     return p.stdout
 
 
-def dispatch(tool, args):
-    """Call (org-mcp-dispatch TOOL JSON-ARGS); return the parsed JSON result.
+def _org_mcp_eval(form):
+    """Evaluate FORM, which calls into org-mcp.el; return the parsed JSON result.
 
-    On a void-function error (org-mcp.el not loaded yet), load it once and retry.
+    On a void-function error (org-mcp.el not loaded yet, e.g. after an Emacs
+    restart), load it once and retry.
     """
-    form = f"(org-mcp-dispatch {_elisp_str(tool)} {_elisp_str(json.dumps(args))})"
     try:
         out = _emacs_eval(form)
     except EmacsError as e:
@@ -142,14 +142,19 @@ def dispatch(tool, args):
     return json.loads(_unwrap_elisp_string(out))
 
 
+def dispatch(tool, args):
+    """Call (org-mcp-dispatch TOOL JSON-ARGS); return the parsed JSON result."""
+    return _org_mcp_eval(
+        f"(org-mcp-dispatch {_elisp_str(tool)} {_elisp_str(json.dumps(args))})")
+
+
 _ROOTS = None
 
 
 def roots():
     global _ROOTS
     if _ROOTS is None:
-        out = _emacs_eval(f"(org-mcp-roots)")
-        _ROOTS = json.loads(_unwrap_elisp_string(out))
+        _ROOTS = _org_mcp_eval("(org-mcp-roots)")
     return _ROOTS
 
 
